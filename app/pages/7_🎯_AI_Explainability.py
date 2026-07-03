@@ -1,131 +1,201 @@
 import streamlit as st
 import pandas as pd
-import joblib
-from pathlib import Path
+from utils import get_data_path, safe_load_model
 
 # =========================
 # CONFIG
 # =========================
 
-st.set_page_config(page_title="AI Explainability", layout="wide")
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-DATA_PATH = PROJECT_ROOT / "data" / "processed" / "netflix_text.csv"
-TFIDF_PATH = PROJECT_ROOT / "models" / "similarity_matrix.pkl"
-BERT_PATH = PROJECT_ROOT / "models" / "bert_similarity.pkl"
+st.set_page_config(
+    page_title="AI Explainability",
+    page_icon="🧠",
+    layout="wide"
+)
 
 # =========================
 # LOAD DATA
 # =========================
 
+DATA_PATH = get_data_path("netflix_with_posters.csv")
+
+if not DATA_PATH.exists():
+    st.error("Dataset not found.")
+    st.stop()
+
 df = pd.read_csv(DATA_PATH)
-
-# IMPORTANT FIX: reset index so it matches similarity matrix
+df.columns = df.columns.str.strip()
 df = df.reset_index(drop=True)
-
-tfidf_sim = joblib.load(TFIDF_PATH)
-bert_sim = joblib.load(BERT_PATH)
 
 # =========================
 # SAFE CLEANING
 # =========================
 
-for col in ["title", "listed_in", "overview"]:
-    if col in df.columns:
-        df[col] = df[col].fillna("")
-    else:
-        df[col] = ""
+if "title" not in df.columns:
+    st.error("Dataset must contain a title column.")
+    st.stop()
+
+df["title"] = df["title"].fillna("Unknown")
+
+if "listed_in" not in df.columns:
+    df["listed_in"] = "Unknown"
+
+df["listed_in"] = df["listed_in"].fillna("Unknown")
+
+# support both overview and description
+if "overview" in df.columns:
+    df["overview"] = df["overview"].fillna("")
+elif "description" in df.columns:
+    df["overview"] = df["description"].fillna("")
+else:
+    df["overview"] = ""
+
+# =========================
+# LOAD MODELS SAFELY
+# =========================
+
+tfidf_sim = safe_load_model("similarity_matrix.pkl")
+bert_sim = safe_load_model("bert_similarity.pkl")
 
 # =========================
 # UI
 # =========================
 
-st.title("🎯 AI Explainability Engine")
-st.markdown("Understand WHY a movie/show was recommended")
+st.title("🧠 AI Explainability Dashboard")
+st.caption("Understand why the recommendation engine selected similar content.")
+
+if tfidf_sim is None or bert_sim is None:
+    st.warning("ML similarity models were not found. Running in explanation-only mode.")
 
 model_choice = st.radio(
-    "Choose Model",
-    ["TF-IDF (Keyword)", "BERT (Semantic)"],
+    "Recommendation Model",
+    ["TF-IDF", "BERT Semantic"],
     horizontal=True
 )
 
-similarity_matrix = tfidf_sim if "TF-IDF" in model_choice else bert_sim
+similarity_matrix = tfidf_sim if model_choice == "TF-IDF" else bert_sim
+
+movie = st.selectbox(
+    "Select a Movie / TV Show",
+    sorted(df["title"].unique())
+)
+
+selected_index = df[df["title"] == movie].index[0]
 
 # =========================
-# MOVIE LIST
+# HELPERS
 # =========================
-
-movie_list = df["title"].unique().tolist()
-selected_movie = st.selectbox("Select a movie/show", movie_list)
-
-# FIX: correct index mapping
-selected_index = df.index[df["title"] == selected_movie][0]
-
-# =========================
-# RECOMMENDATIONS
-# =========================
-
-def get_recommendations(index, sim_matrix, top_n=5):
-    scores = list(enumerate(sim_matrix[index]))
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
-
-    recs = []
-    for i, score in scores[1:200]:
-        recs.append((i, float(score)))
-        if len(recs) == top_n:
-            break
-    return recs
-
 
 def extract_keywords(text):
+    stopwords = {
+        "the","and","for","with","this","that",
+        "from","into","their","they","have",
+        "been","will","your","about","after",
+        "before","where","when","while","what",
+        "which","whose","there","here","over",
+        "under","into","than","then","them",
+        "movie","film","show"
+    }
+
     words = str(text).lower().split()
-    stopwords = set(["the", "a", "and", "is", "in", "of", "to", "with", "on", "for"])
-    return set([w for w in words if w not in stopwords and len(w) > 2])
+
+    return {
+        w.strip(".,!?()[]")
+        for w in words
+        if len(w) > 3 and w not in stopwords
+    }
 
 
-recs = get_recommendations(selected_index, similarity_matrix)
+def fallback(index, top_n=5):
+    base = df.iloc[index]
 
-# ❌ REMOVED THIS LINE (this was your black stuck header issue)
-# st.subheader(f"🎬 Selected: {selected_movie}")
+    similar = df[
+        (df["listed_in"] == base["listed_in"])
+    ]
 
-st.markdown("## 🧠 Why these were recommended")
+    similar = similar[similar.index != index]
 
-base_genre = str(df.loc[selected_index, "listed_in"])
-base_keywords = extract_keywords(df.loc[selected_index, "overview"])
+    return [(i, 0.60) for i in similar.index[:top_n]]
+
+
+def get_recommendations(index, matrix, top_n=5):
+
+    if matrix is None:
+        return fallback(index, top_n)
+
+    scores = list(enumerate(matrix[index]))
+    scores.sort(key=lambda x: x[1], reverse=True)
+
+    return [
+        (i, float(score))
+        for i, score in scores[1:top_n+1]
+    ]
 
 # =========================
-# OUTPUT
+# GENERATE
 # =========================
 
-for idx, score in recs:
+recommendations = get_recommendations(
+    selected_index,
+    similarity_matrix
+)
 
-    title = df.loc[idx, "title"]
-    genre = str(df.loc[idx, "listed_in"])
-    overview = df.loc[idx, "overview"]
+base_genres = set(
+    str(df.loc[selected_index, "listed_in"]).split(",")
+)
 
-    rec_keywords = extract_keywords(overview)
+base_keywords = extract_keywords(
+    df.loc[selected_index, "overview"]
+)
 
-    genre_match = len(set(base_genre.split(",")) & set(genre.split(",")))
-    keyword_match = len(base_keywords & rec_keywords)
+st.markdown("## 🎯 Why These Titles Were Recommended")
 
-    st.markdown(f"""
----
+for idx, score in recommendations:
 
-## 🎬 {title}
+    row = df.iloc[idx]
 
-- ⭐ **Similarity Score:** `{round(score, 3)}`
-- 🎭 **Genre Match:** {genre_match}
-- 🧠 **Keyword Overlap:** {keyword_match}
+    title = row["title"]
+    genres = set(str(row["listed_in"]).split(","))
+    overview = row["overview"]
 
-### 💡 Why this was recommended:
-- Genre similarity
-- Semantic similarity (AI embeddings)
-- Keyword/story overlap
+    overlap = base_keywords & extract_keywords(overview)
 
----
-""")
+    genre_overlap = len(base_genres & genres)
 
-# Footer (your request)
-st.markdown("---")
-st.markdown("🚀 Developed by **Divyansh Agarwal**")
+    with st.container(border=True):
+
+        st.subheader(f"🎬 {title}")
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Similarity",
+            f"{score:.3f}"
+        )
+
+        col2.metric(
+            "Genre Match",
+            genre_overlap
+        )
+
+        col3.metric(
+            "Keyword Match",
+            len(overlap)
+        )
+
+        st.markdown("**Why recommended**")
+
+        st.write("• Similar genres")
+
+        st.write("• Similar story themes")
+
+        st.write("• Similar keywords")
+
+        if overlap:
+            st.write(
+                "**Shared keywords:** "
+                + ", ".join(sorted(list(overlap))[:10])
+            )
+
+st.divider()
+
+st.caption("🚀 Developed by Divyansh Agarwal")

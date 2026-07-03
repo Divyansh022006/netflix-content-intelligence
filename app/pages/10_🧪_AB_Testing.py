@@ -1,158 +1,265 @@
 import streamlit as st
 import pandas as pd
-import joblib
 import numpy as np
-from pathlib import Path
 import matplotlib.pyplot as plt
 
+from utils import get_data_path, safe_load_model
+
 # =========================
-# CONFIG
+# PAGE CONFIG
 # =========================
 
-st.set_page_config(page_title="A/B Testing - Netflix ML", layout="wide")
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-DATA_PATH = PROJECT_ROOT / "data" / "processed" / "netflix_text.csv"
-TFIDF_PATH = PROJECT_ROOT / "models" / "similarity_matrix.pkl"
-BERT_PATH = PROJECT_ROOT / "models" / "bert_similarity.pkl"
+st.set_page_config(
+    page_title="A/B Testing - Netflix ML",
+    page_icon="🧪",
+    layout="wide"
+)
 
 # =========================
 # LOAD DATA
 # =========================
 
+DATA_PATH = get_data_path("netflix_text.csv")
+
+if not DATA_PATH.exists():
+    st.error(f"Dataset not found:\n{DATA_PATH}")
+    st.stop()
+
 df = pd.read_csv(DATA_PATH)
-tfidf_sim = joblib.load(TFIDF_PATH)
-bert_sim = joblib.load(BERT_PATH)
+df.columns = df.columns.str.strip()
+df.reset_index(drop=True, inplace=True)
 
 # =========================
-# SAFE CLEANING (FIXED)
+# SAFE CLEANING
 # =========================
 
-df["title"] = df["title"].fillna("Unknown") if "title" in df.columns else "Unknown"
-df["release_year"] = pd.to_numeric(df["release_year"], errors="coerce").fillna(0).astype(int)
+if "title" in df.columns:
+    df["title"] = df["title"].fillna("Unknown")
+else:
+    df["title"] = "Unknown"
 
-df["overview"] = df["overview"].fillna("") if "overview" in df.columns else ""
-df["listed_in"] = df["listed_in"].fillna("Unknown") if "listed_in" in df.columns else "Unknown"
+if "release_year" in df.columns:
+    df["release_year"] = pd.to_numeric(
+        df["release_year"],
+        errors="coerce"
+    ).fillna(0).astype(int)
+else:
+    df["release_year"] = 0
+
+if "listed_in" in df.columns:
+    df["listed_in"] = df["listed_in"].fillna("Unknown")
+else:
+    df["listed_in"] = "Unknown"
+
+if "overview" in df.columns:
+    df["overview"] = df["overview"].fillna("")
+else:
+    df["overview"] = ""
+
+# =========================
+# LOAD MODELS
+# =========================
+
+tfidf_sim = safe_load_model("similarity_matrix.pkl")
+bert_sim = safe_load_model("bert_similarity.pkl")
+
+# =========================
+# SEARCH
+# =========================
+
+def find_index(query):
+
+    matches = df[
+        df["title"].str.contains(
+            query,
+            case=False,
+            na=False
+        )
+    ]
+
+    if matches.empty:
+        return None
+
+    return matches.index[0]
 
 # =========================
 # RECOMMENDER
 # =========================
 
 def recommend(index, sim_matrix, top_n=5):
-    scores = list(enumerate(sim_matrix[index]))
-    scores = [(i, float(s)) for i, s in scores]
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
 
-    results = []
+    if sim_matrix is None:
+        return []
 
-    for i, score in scores[1:200]:
-        row = df.iloc[i]
+    try:
 
-        results.append({
-            "title": row["title"],
-            "year": row["release_year"],
-            "genre": row.get("listed_in", "Unknown"),
-            "score": score
-        })
+        scores = list(enumerate(sim_matrix[index]))
+        scores = sorted(
+            scores,
+            key=lambda x: x[1],
+            reverse=True
+        )
 
-        if len(results) == top_n:
-            break
+        recommendations = []
 
-    return results
+        for movie_index, score in scores[1:]:
+
+            if movie_index >= len(df):
+                continue
+
+            row = df.iloc[movie_index]
+
+            recommendations.append({
+                "title": row["title"],
+                "year": row["release_year"],
+                "genre": row["listed_in"],
+                "score": float(score)
+            })
+
+            if len(recommendations) >= top_n:
+                break
+
+        return recommendations
+
+    except Exception:
+        return []
 
 # =========================
 # SIMULATED CLICK MODEL
 # =========================
 
-def simulate_clicks(recs):
-    # simple heuristic: higher similarity = higher chance of click
+def simulate_clicks(recommendations):
+
+    if len(recommendations) == 0:
+        return 0
+
     clicks = 0
-    for r in recs:
-        if r["score"] > 0.20:
+
+    for movie in recommendations:
+
+        if movie["score"] >= 0.20:
             clicks += 1
+
     return clicks
 
 # =========================
 # UI
 # =========================
 
-st.title("🧪 A/B Testing: TF-IDF vs BERT")
-st.markdown("Compare recommendation quality like a real ML engineer")
+st.title("🧪 A/B Testing Dashboard")
 
-query = st.text_input("🔍 Enter any movie/show")
+st.caption(
+    "Compare recommendation quality between TF-IDF and BERT"
+)
+
+query = st.text_input(
+    "🔍 Enter a movie or TV show"
+)
 
 # =========================
-# RUN TEST
+# RUN
 # =========================
 
-if st.button("Run A/B Test 🚀"):
+if st.button("🚀 Run A/B Test"):
 
-    if not query.strip():
-        st.warning("Please enter a query")
+    if query.strip() == "":
+        st.warning("Please enter a movie name.")
         st.stop()
 
-    # pick index safely
-    idx = df.sample(1).index[0]
+    index = find_index(query)
 
-    tfidf_recs = recommend(idx, tfidf_sim)
-    bert_recs = recommend(idx, bert_sim)
+    if index is None:
+        st.error("Movie not found.")
+        st.stop()
 
-    # =========================
-    # METRICS
-    # =========================
+    tfidf_results = recommend(index, tfidf_sim)
+    bert_results = recommend(index, bert_sim)
 
-    tfidf_clicks = simulate_clicks(tfidf_recs)
-    bert_clicks = simulate_clicks(bert_recs)
+    if not tfidf_results and not bert_results:
+        st.error("Recommendation models could not be loaded.")
+        st.stop()
 
-    tfidf_avg = np.mean([r["score"] for r in tfidf_recs])
-    bert_avg = np.mean([r["score"] for r in bert_recs])
+    tfidf_clicks = simulate_clicks(tfidf_results)
+    bert_clicks = simulate_clicks(bert_results)
 
-    winner = "🧠 BERT Wins" if bert_clicks > tfidf_clicks else "📊 TF-IDF Wins"
+    tfidf_avg = (
+        np.mean([x["score"] for x in tfidf_results])
+        if tfidf_results else 0
+    )
 
-    st.subheader(f"🏆 Winner: {winner}")
+    bert_avg = (
+        np.mean([x["score"] for x in bert_results])
+        if bert_results else 0
+    )
 
-    # =========================
-    # SIDE BY SIDE
-    # =========================
+    winner = (
+        "🧠 BERT"
+        if bert_avg > tfidf_avg
+        else "📊 TF-IDF"
+    )
+
+    st.success(f"🏆 Winner: {winner}")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("## 📊 TF-IDF Results")
-        for r in tfidf_recs:
-            st.write(f"🎬 {r['title']} | ⭐ {r['score']:.3f}")
+
+        st.subheader("📊 TF-IDF")
+
+        if tfidf_results:
+
+            for movie in tfidf_results:
+
+                st.write(
+                    f"🎬 {movie['title']} "
+                    f"({movie['year']}) "
+                    f"⭐ {movie['score']:.3f}"
+                )
+
+        else:
+            st.info("Model unavailable.")
 
     with col2:
-        st.markdown("## 🧠 BERT Results")
-        for r in bert_recs:
-            st.write(f"🎬 {r['title']} | ⭐ {r['score']:.3f}")
 
-    # =========================
-    # METRICS TABLE
-    # =========================
+        st.subheader("🧠 BERT")
 
-    st.subheader("📈 Comparison Metrics")
+        if bert_results:
+
+            for movie in bert_results:
+
+                st.write(
+                    f"🎬 {movie['title']} "
+                    f"({movie['year']}) "
+                    f"⭐ {movie['score']:.3f}"
+                )
+
+        else:
+            st.info("Model unavailable.")
+
+    st.subheader("📈 Metrics")
 
     metrics = pd.DataFrame({
         "Model": ["TF-IDF", "BERT"],
-        "Clicks (Simulated)": [tfidf_clicks, bert_clicks],
-        "Avg Similarity": [tfidf_avg, bert_avg]
+        "Simulated Clicks": [tfidf_clicks, bert_clicks],
+        "Average Similarity": [
+            round(tfidf_avg, 3),
+            round(bert_avg, 3)
+        ]
     })
 
-    st.dataframe(metrics)
+    st.dataframe(metrics, use_container_width=True)
 
-    # =========================
-    # VISUALIZATION
-    # =========================
-
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(5,4))
 
     ax.bar(
         ["TF-IDF", "BERT"],
         [tfidf_clicks, bert_clicks]
     )
 
-    ax.set_title("Simulated Click Performance")
+    ax.set_ylabel("Simulated Clicks")
+    ax.set_title("A/B Test Comparison")
 
     st.pyplot(fig)
+
+st.markdown("---")
+st.caption("🚀 Developed by Divyansh Agarwal")
