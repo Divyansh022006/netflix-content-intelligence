@@ -3,8 +3,8 @@ import pandas as pd
 import joblib
 import numpy as np
 import time
-
 from pathlib import Path
+from utils import get_data_path, safe_load_model
 
 # =========================
 # CONFIG
@@ -12,71 +12,94 @@ from pathlib import Path
 
 st.set_page_config(page_title="Model Comparison", layout="wide")
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# =========================
+# SAFE PATHS (CLOUD + LOCAL)
+# =========================
 
-DATA_PATH = PROJECT_ROOT / "data" / "processed" / "netflix_text.csv"
-TFIDF_PATH = PROJECT_ROOT / "models" / "similarity_matrix.pkl"
-BERT_PATH = PROJECT_ROOT / "models" / "bert_similarity.pkl"
+DATA_PATH = get_data_path("netflix_text.csv")
+
+if not DATA_PATH.exists():
+    st.error(f"Dataset not found: {DATA_PATH}")
+    st.stop()
 
 # =========================
 # LOAD DATA
 # =========================
 
 df = pd.read_csv(DATA_PATH)
+df.columns = df.columns.str.strip()
 
-tfidf_sim = joblib.load(TFIDF_PATH)
-bert_sim = joblib.load(BERT_PATH)
+# SAFE CLEANING
+df["title"] = df.get("title", pd.Series(["Unknown"] * len(df))).fillna("Unknown")
+df["release_year"] = pd.to_numeric(
+    df.get("release_year", 0),
+    errors="coerce"
+).fillna(0).astype(int)
+
+# reset index (VERY IMPORTANT for similarity matrix alignment)
+df = df.reset_index(drop=True)
 
 # =========================
-# CLEAN DATA (SAFE)
+# LOAD MODELS SAFELY
 # =========================
 
-df["title"] = df.get("title", "Unknown").fillna("Unknown")
-df["release_year"] = pd.to_numeric(df.get("release_year", 0), errors="coerce").fillna(0).astype(int)
+tfidf_sim = safe_load_model("similarity_matrix.pkl")
+bert_sim = safe_load_model("bert_similarity.pkl")
+
+if tfidf_sim is None or bert_sim is None:
+    st.error("❌ Recommendation models could not be loaded.")
+    st.stop()
 
 # =========================
 # HELPERS
 # =========================
 
 def recommend(sim_matrix, idx, top_n=10):
-    scores = list(enumerate(sim_matrix[idx]))
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
+    try:
+        scores = list(enumerate(sim_matrix[idx]))
+        scores = sorted(scores, key=lambda x: x[1], reverse=True)
 
-    results = []
-    for i, score in scores[1:200]:
-        row = df.iloc[i]
+        results = []
 
-        results.append({
-            "title": row["title"],
-            "year": row["release_year"],
-            "score": float(score)
-        })
+        for i, score in scores[1:200]:
+            if i >= len(df):
+                continue
 
-        if len(results) == top_n:
-            break
+            row = df.iloc[i]
 
-    return results
+            results.append({
+                "title": row["title"],
+                "year": int(row["release_year"]),
+                "score": float(score)
+            })
+
+            if len(results) == top_n:
+                break
+
+        return results
+
+    except Exception:
+        return []
 
 
 def diversity_score(recs):
-    # simple diversity: unique years spread
+    if not recs:
+        return 0
     years = [r["year"] for r in recs]
     return len(set(years)) / len(years)
-
 
 # =========================
 # UI
 # =========================
 
 st.title("📊 Model Comparison: TF-IDF vs BERT")
-st.markdown("Compare recommendation quality like a research paper")
+st.caption("Compare recommendation quality like a research system")
 
 query = st.text_input("🔍 Enter a movie/show title")
-
 top_k = st.slider("Top K recommendations", 5, 15, 10)
 
 # =========================
-# MAIN LOGIC
+# MAIN
 # =========================
 
 if st.button("Compare Models 🚀"):
@@ -85,7 +108,6 @@ if st.button("Compare Models 🚀"):
         st.warning("Enter a title")
         st.stop()
 
-    # find index
     matches = df[df["title"].str.contains(query, case=False, na=False)]
 
     if matches.empty:
@@ -115,47 +137,65 @@ if st.button("Compare Models 🚀"):
     bert_div = diversity_score(bert_recs)
 
     # =========================
-    # SUMMARY TABLE
+    # SUMMARY
     # =========================
+
     st.subheader("⚡ Performance Comparison")
 
     st.table(pd.DataFrame([
-        {"Model": "TF-IDF", "Time (sec)": round(tfidf_time, 4), "Diversity": round(tfidf_div, 3)},
-        {"Model": "BERT", "Time (sec)": round(bert_time, 4), "Diversity": round(bert_div, 3)},
+        {
+            "Model": "TF-IDF",
+            "Time (sec)": round(tfidf_time, 4),
+            "Diversity": round(tfidf_div, 3)
+        },
+        {
+            "Model": "BERT",
+            "Time (sec)": round(bert_time, 4),
+            "Diversity": round(bert_div, 3)
+        }
     ]))
 
     # =========================
-    # SIDE-BY-SIDE RESULTS
+    # RESULTS
     # =========================
+
     st.subheader("🎬 Recommendation Comparison")
 
     col1, col2 = st.columns(2)
 
     with col1:
         st.markdown("### TF-IDF Results")
-        for r in tfidf_recs:
-            st.write(f"🎬 {r['title']} ({r['year']}) - ⭐ {round(r['score'],3)}")
+        if tfidf_recs:
+            for r in tfidf_recs:
+                st.write(f"🎬 {r['title']} ({r['year']}) - ⭐ {r['score']:.3f}")
+        else:
+            st.warning("No TF-IDF results")
 
     with col2:
         st.markdown("### BERT Results")
-        for r in bert_recs:
-            st.write(f"🎬 {r['title']} ({r['year']}) - ⭐ {round(r['score'],3)}")
+        if bert_recs:
+            for r in bert_recs:
+                st.write(f"🎬 {r['title']} ({r['year']}) - ⭐ {r['score']:.3f}")
+        else:
+            st.warning("No BERT results")
 
     # =========================
-    # OVERLAP ANALYSIS
+    # OVERLAP
     # =========================
+
     st.subheader("🔁 Overlap Analysis")
 
-    tfidf_titles = set(r["title"] for r in tfidf_recs)
-    bert_titles = set(r["title"] for r in bert_recs)
-
-    overlap = len(tfidf_titles & bert_titles)
+    overlap = len(
+        set(r["title"] for r in tfidf_recs)
+        & set(r["title"] for r in bert_recs)
+    )
 
     st.metric("Common Recommendations", overlap)
 
     # =========================
-    # VISUALIZATION
+    # CHART
     # =========================
+
     st.subheader("📈 Diversity Comparison")
 
     st.bar_chart(pd.DataFrame({

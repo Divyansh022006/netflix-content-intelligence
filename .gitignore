@@ -24,3 +24,5 @@ models/*.npy
 
 # Streamlit cache
 .streamlit/
+
+models/*.pkl
