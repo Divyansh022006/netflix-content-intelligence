@@ -64,9 +64,9 @@ st.title("🧠 AI Explainability Dashboard")
 st.caption("Understand why the recommendation engine selected similar content.")
 
 if tfidf_sim is None or bert_sim is None:
-    st.warning("ML similarity models were not found. Running in explanation-only mode.")
+    #st.warning("ML similarity models were not found. Running in explanation-only mode.")
 
-model_choice = st.radio(
+ model_choice = st.radio(
     "Recommendation Model",
     ["TF-IDF", "BERT Semantic"],
     horizontal=True

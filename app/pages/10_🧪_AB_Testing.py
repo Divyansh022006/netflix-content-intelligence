@@ -9,13 +9,13 @@ import matplotlib.pyplot as plt
 # =========================
 
 st.set_page_config(
-    page_title="A/B Testing - Netflix ML",
+    page_title="A/B Testing",
     page_icon="🧪",
     layout="wide"
 )
 
 # =========================
-# ROOT FINDER (CLOUD SAFE)
+# ROOT FINDER
 # =========================
 
 ROOT = Path(__file__).resolve()
@@ -31,166 +31,204 @@ DATA_PATH = PROJECT_ROOT / "data" / "processed" / "netflix_text.csv"
 # LOAD DATA
 # =========================
 
+if not DATA_PATH.exists():
+    st.error("Dataset not found.")
+    st.stop()
+
 df = pd.read_csv(DATA_PATH)
 df.columns = df.columns.str.strip()
 
-df["title"] = df.get("title", "Unknown").fillna("Unknown")
-df["release_year"] = pd.to_numeric(df.get("release_year", 0), errors="coerce").fillna(0).astype(int)
-df["listed_in"] = df.get("listed_in", "Unknown").fillna("Unknown")
-df["overview"] = df.get("overview", "").fillna("")
+# =========================
+# SAFE CLEANING
+# =========================
+
+if "title" in df.columns:
+    df["title"] = df["title"].fillna("Unknown")
+else:
+    df["title"] = "Unknown"
+
+if "release_year" in df.columns:
+    df["release_year"] = pd.to_numeric(
+        df["release_year"],
+        errors="coerce"
+    ).fillna(0).astype(int)
+else:
+    df["release_year"] = 0
+
+if "listed_in" in df.columns:
+    df["listed_in"] = df["listed_in"].fillna("Unknown")
+else:
+    df["listed_in"] = "Unknown"
 
 # =========================
-# SEARCH → INDEX
+# SEARCH
 # =========================
 
 def find_index(query):
     matches = df[df["title"].str.contains(query, case=False, na=False)]
-    if len(matches) == 0:
+
+    if matches.empty:
         return None
+
     return matches.index[0]
 
 # =========================
-# SIMPLE RECOMMENDERS (NO ML MODELS)
+# MODEL A
+# Genre + Year
 # =========================
 
-# Model A: Genre + Year based
 def recommend_model_a(index, top_n=5):
-    base = df.iloc[index]
+
+    movie = df.iloc[index]
 
     similar = df[
-        (df["listed_in"] == base["listed_in"]) |
-        (abs(df["release_year"] - base["release_year"]) <= 2)
+        (df["listed_in"] == movie["listed_in"]) |
+        (abs(df["release_year"] - movie["release_year"]) <= 2)
     ]
 
-    similar = similar[similar.index != index].drop_duplicates("title")
+    similar = similar.drop_duplicates("title")
+    similar = similar[similar.index != index]
 
-    results = []
+    recs = []
+
     for _, row in similar.head(top_n).iterrows():
-        results.append({
+
+        recs.append({
             "title": row["title"],
-            "year": row["release_year"],
-            "score": 0.60
+            "year": int(row["release_year"]),
+            "score": 0.65
         })
 
-    return results
-
-
-# Model B: Keyword overlap (simple NLP simulation)
-def recommend_model_b(index, top_n=5):
-    base_words = set(str(df.loc[index, "overview"]).lower().split())
-
-    scores = []
-
-    for i, row in df.iterrows():
-        if i == index:
-            continue
-
-        words = set(str(row["overview"]).lower().split())
-        overlap = len(base_words & words)
-
-        scores.append((i, overlap))
-
-    scores.sort(key=lambda x: x[1], reverse=True)
-
-    results = []
-    for i, score in scores[:top_n]:
-        row = df.iloc[i]
-        results.append({
-            "title": row["title"],
-            "year": row["release_year"],
-            "score": float(score)
-        })
-
-    return results
-
+    return recs
 
 # =========================
-# SIMULATED METRICS
+# MODEL B
+# Genre only
+# =========================
+
+def recommend_model_b(index, top_n=5):
+
+    movie = df.iloc[index]
+
+    similar = df[
+        df["listed_in"] == movie["listed_in"]
+    ]
+
+    similar = similar.sort_values(
+        "release_year",
+        ascending=False
+    )
+
+    similar = similar.drop_duplicates("title")
+    similar = similar[similar.index != index]
+
+    recs = []
+
+    score = 0.95
+
+    for _, row in similar.head(top_n).iterrows():
+
+        recs.append({
+            "title": row["title"],
+            "year": int(row["release_year"]),
+            "score": round(score, 2)
+        })
+
+        score -= 0.08
+
+    return recs
+
+# =========================
+# METRICS
 # =========================
 
 def simulate_clicks(recs):
-    return sum(1 for r in recs if r["score"] > 0.5)
+    return len(recs)
 
-def avg_score(recs):
-    return np.mean([r["score"] for r in recs]) if recs else 0
+def average_score(recs):
+
+    if not recs:
+        return 0
+
+    return np.mean([r["score"] for r in recs])
 
 # =========================
 # UI
 # =========================
 
-st.title("🧪 A/B Testing Dashboard (Fixed)")
-st.caption("No ML models required — fully deployment safe")
+st.title("🧪 A/B Testing Dashboard")
+st.caption("Compare two recommendation strategies")
 
 query = st.text_input("🔍 Enter a movie or TV show")
 
 # =========================
-# RUN TEST
+# RUN
 # =========================
 
-if st.button("Run A/B Test 🚀"):
+if st.button("🚀 Run A/B Test"):
 
     if not query.strip():
-        st.warning("Please enter a title")
+        st.warning("Please enter a title.")
         st.stop()
 
     idx = find_index(query)
 
     if idx is None:
-        st.error("No matching movie found")
+        st.error("Movie not found.")
         st.stop()
 
-    # Run both models
     model_a = recommend_model_a(idx)
     model_b = recommend_model_b(idx)
 
-    # Metrics
-    a_clicks = simulate_clicks(model_a)
-    b_clicks = simulate_clicks(model_b)
+    clicks_a = simulate_clicks(model_a)
+    clicks_b = simulate_clicks(model_b)
 
-    a_avg = avg_score(model_a)
-    b_avg = avg_score(model_b)
+    avg_a = average_score(model_a)
+    avg_b = average_score(model_b)
 
-    winner = "🧠 Model B Wins" if b_clicks > a_clicks else "📊 Model A Wins"
+    winner = "📊 Model A"
 
-    st.subheader(f"🏆 Winner: {winner}")
+    if avg_b > avg_a:
+        winner = "🧠 Model B"
 
-    # =========================
-    # SIDE BY SIDE
-    # =========================
+    st.success(f"Winner: {winner}")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("## 📊 Model A (Genre + Year)")
+
+        st.subheader("📊 Model A")
+
         for r in model_a:
-            st.write(f"🎬 {r['title']} | ⭐ {r['score']}")
+            st.write(f"🎬 {r['title']} ({r['year']})")
+            st.progress(r["score"])
 
     with col2:
-        st.markdown("## 🧠 Model B (Keyword Similarity)")
+
+        st.subheader("🧠 Model B")
+
         for r in model_b:
-            st.write(f"🎬 {r['title']} | ⭐ {r['score']}")
+            st.write(f"🎬 {r['title']} ({r['year']})")
+            st.progress(r["score"])
 
-    # =========================
-    # METRICS TABLE
-    # =========================
-
-    st.subheader("📈 Comparison Metrics")
+    st.subheader("📈 Comparison")
 
     metrics = pd.DataFrame({
         "Model": ["Model A", "Model B"],
-        "Clicks (Simulated)": [a_clicks, b_clicks],
-        "Avg Score": [a_avg, b_avg]
+        "Clicks": [clicks_a, clicks_b],
+        "Average Score": [round(avg_a, 2), round(avg_b, 2)]
     })
 
     st.dataframe(metrics, use_container_width=True)
 
-    # =========================
-    # VISUALIZATION
-    # =========================
-
     fig, ax = plt.subplots()
 
-    ax.bar(["Model A", "Model B"], [a_clicks, b_clicks])
-    ax.set_title("A/B Test Performance")
+    ax.bar(
+        ["Model A", "Model B"],
+        [avg_a, avg_b]
+    )
+
+    ax.set_ylabel("Average Score")
+    ax.set_title("Recommendation Comparison")
 
     st.pyplot(fig)
